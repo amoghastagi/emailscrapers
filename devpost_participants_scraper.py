@@ -15,10 +15,106 @@ import gc
 import psutil
 import os
 
+class DevpostHackathonScraper:
+    """Scraper for hackathon URLs from Devpost"""
+    
+    def __init__(self):
+        self.base_url = "https://devpost.com"
+        self.hackathons_url = f"{self.base_url}/hackathons"
+        self.driver = None
+        
+    def setup_driver(self):
+        """Setup Chrome driver with optimized options"""
+        if self.driver:
+            return
+            
+        chrome_options = Options()
+        chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        
+        # Uncomment for headless mode
+        # chrome_options.add_argument("--headless")
+        
+        self.driver = webdriver.Chrome(options=chrome_options)
+        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        self.driver.set_page_load_timeout(30)
+        self.driver.implicitly_wait(10)
+    
+    def scroll_to_load_all(self, pause_time=2, max_scrolls=10):
+        """Scroll to load all hackathons"""
+        print("📜 Scrolling to load all hackathons...")
+        
+        last_height = self.driver.execute_script("return document.body.scrollHeight")
+        scrolls_done = 0
+        
+        for scroll in range(max_scrolls):
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(pause_time)
+            
+            new_height = self.driver.execute_script("return document.body.scrollHeight")
+            scrolls_done += 1
+            
+            print(f"   Scroll {scrolls_done}/{max_scrolls} - Page height: {new_height:,}px")
+            
+            if new_height == last_height:
+                print("   No more content to load")
+                break
+            last_height = new_height
+    
+    def extract_hackathon_urls(self):
+        """Extract hackathon URLs from the page"""
+        tiles = self.driver.find_elements(By.CSS_SELECTOR, 'div.hackathon-tile a.tile-anchor')
+        urls = []
+        
+        for tile in tiles:
+            href = tile.get_attribute("href")
+            if href and "devpost.com" in href:
+                clean_url = href.split("?")[0]  # Clean the URL
+                urls.append(clean_url)
+        
+        return list(set(urls))  # Remove duplicates
+    
+    def scrape_hackathons(self, status="open", challenge_type="online"):
+        """Scrape hackathon URLs with filters"""
+        print("🚀 Starting hackathon URL scraper...")
+        
+        # Build URL with filters
+        url = f"{self.hackathons_url}?status={status}&challenge_type={challenge_type}"
+        print(f"🎯 Target: {url}")
+        
+        try:
+            self.setup_driver()
+            self.driver.get(url)
+            time.sleep(3)  # Wait for content to load
+            
+            # Scroll to load all hackathons
+            self.scroll_to_load_all()
+            
+            # Extract URLs
+            hackathon_urls = self.extract_hackathon_urls()
+            
+            print(f"✅ Found {len(hackathon_urls)} hackathons")
+            return hackathon_urls
+            
+        except Exception as e:
+            print(f"❌ Error scraping hackathons: {e}")
+            return []
+        finally:
+            if self.driver:
+                self.driver.quit()
+
+
 class DevpostParticipantsScraper:
-    def __init__(self, use_selenium=False, max_participants=5000, start_offset=0):
-        self.base_url = "https://kiro.devpost.com/"
-        self.participants_url = f"{self.base_url}/participants"
+    """Enhanced participant scraper with better error handling"""
+    
+    def __init__(self, hackathon_url, use_selenium=True, max_participants=5000, start_offset=0):
+        self.hackathon_url = hackathon_url.rstrip('/')
+        self.participants_url = f"{self.hackathon_url}/participants"
         self.use_selenium = use_selenium
         self.max_participants = max_participants
         self.start_offset = start_offset
@@ -149,7 +245,8 @@ class DevpostParticipantsScraper:
     
     def save_checkpoint(self, participants, checkpoint_num):
         """Save checkpoint data"""
-        checkpoint_filename = f"checkpoint_{checkpoint_num}_participants.json"
+        hackathon_name = self.hackathon_url.split('/')[-1]
+        checkpoint_filename = f"checkpoint_{hackathon_name}_{checkpoint_num}_participants.json"
         try:
             with open(checkpoint_filename, 'w', encoding='utf-8') as f:
                 json.dump(participants, f, indent=2, ensure_ascii=False)
@@ -473,6 +570,40 @@ class DevpostParticipantsScraper:
             
         return None
     
+    def scrape_participants(self, include_contact_info=False):
+        """Main method to scrape participants with better error handling"""
+        hackathon_name = self.hackathon_url.split('/')[-1]
+        print("🚀 Starting Devpost participants scraper...")
+        print(f"🎯 Hackathon: {hackathon_name}")
+        print(f"🔗 Participants URL: {self.participants_url}")
+        print(f"📊 Batch: {self.start_offset + 1:,} to {self.start_offset + self.max_participants:,}")
+        
+        # Try requests method first
+        participants = self.scrape_with_requests()
+        
+        # If requests fails, use Selenium
+        if participants is None:
+            print("🔄 Switching to Selenium method...")
+            participants = self.scrape_with_selenium()
+        
+        participants = participants or []
+        
+        # Scrape detailed profile information if requested
+        if include_contact_info and participants:
+            print(f"\n📋 Scraping detailed profile information for {len(participants):,} participants...")
+            
+            for i, participant in enumerate(participants):
+                if (i + 1) % 100 == 0:
+                    print(f"   Progress: {i+1:,}/{len(participants):,} ({((i+1)/len(participants)*100):.1f}%)")
+                
+                try:
+                    participants[i] = self.scrape_participant_profile(participant)
+                except Exception as e:
+                    print(f"   ⚠️  Error scraping profile {i+1}: {e}")
+                    continue
+        
+        return participants
+    
     def scrape_participant_profile(self, participant):
         """Scrape detailed information from a participant's profile page"""
         if not participant.get('profile_url'):
@@ -548,48 +679,20 @@ class DevpostParticipantsScraper:
         
         return 'other'
     
-    def scrape_participants(self, include_contact_info=True):
-        """Main method to scrape participants with better error handling"""
-        print("🚀 Starting Devpost participants scraper...")
-        print(f"🎯 Target: {self.participants_url}")
-        print(f"📊 Batch: {self.start_offset + 1:,} to {self.start_offset + self.max_participants:,}")
-        
-        # Try requests method first
-        participants = self.scrape_with_requests()
-        
-        # If requests fails, use Selenium
-        if participants is None:
-            print("🔄 Switching to Selenium method...")
-            participants = self.scrape_with_selenium()
-        
-        participants = participants or []
-        
-        # Scrape detailed profile information if requested
-        if include_contact_info and participants:
-            print(f"\n📋 Scraping detailed profile information for {len(participants):,} participants...")
-            
-            for i, participant in enumerate(participants):
-                if (i + 1) % 100 == 0:
-                    print(f"   Progress: {i+1:,}/{len(participants):,} ({((i+1)/len(participants)*100):.1f}%)")
-                
-                try:
-                    participants[i] = self.scrape_participant_profile(participant)
-                except Exception as e:
-                    print(f"   ⚠️  Error scraping profile {i+1}: {e}")
-                    continue
-        
-        return participants
-    
     def save_results(self, participants, filename=None):
         """Save results to JSON file with batch info"""
+        hackathon_name = self.hackathon_url.split('/')[-1]
+        
         if filename is None:
             batch_start = self.start_offset + 1
             batch_end = self.start_offset + len(participants)
-            filename = f"devpost_participants_{batch_start}-{batch_end}.json"
+            filename = f"{hackathon_name}_participants_{batch_start}-{batch_end}.json"
         
         try:
             data = {
                 "metadata": {
+                    "hackathon_url": self.hackathon_url,
+                    "hackathon_name": hackathon_name,
                     "batch_start": self.start_offset + 1,
                     "batch_end": self.start_offset + len(participants),
                     "total_in_batch": len(participants),
@@ -628,98 +731,297 @@ class DevpostParticipantsScraper:
         
         return valid_participants
 
+
 def main():
-    """Main execution function with recovery options"""
-    print("🚀 Devpost Participants Scraper - Enhanced Batch Mode")
-    print("=" * 50)
+    """Main execution function with menu system"""
+    print("🚀 Combined Devpost Hackathon & Participant Scraper")
+    print("=" * 60)
     
-    # Check for checkpoint files
-    checkpoint_files = [f for f in os.listdir('.') if f.startswith('checkpoint_') and f.endswith('.json')]
-    if checkpoint_files:
-        print(f"📁 Found {len(checkpoint_files)} checkpoint files")
-        print("   Use these to resume from where you left off")
-    
-    # Get batch configuration
-    print("\n📊 Batch Configuration:")
-    try:
-        start_offset = int(input("Enter starting offset (0 for first batch, 5000 for second, etc.): "))
-        max_participants = int(input("Enter batch size (default 3000 for stability): ") or "3000")
-    except ValueError:
-        print("❌ Invalid input. Using defaults: offset=0, batch_size=3000")
-        start_offset = 0
-        max_participants = 3000
-    
-    # Initialize scraper
-    scraper = DevpostParticipantsScraper(
-        max_participants=max_participants,
-        start_offset=start_offset
-    )
-    
-    try:
-        # Ask about contact info
-        print(f"\n🤔 Do you want to scrape detailed contact information?")
-        print(f"   This will process participants {start_offset + 1:,} to {start_offset + max_participants:,}")
-        include_contact = input("Include contact info? (y/n): ").strip().lower() == 'y'
+    while True:
+        print("\n📋 What would you like to do?")
+        print("   1. 🔍 Scrape hackathon URLs")
+        print("   2. 👥 Scrape participants from a hackathon")
+        print("   3. 🔄 Full workflow (scrape hackathons, then participants)")
+        print("   4. 📊 Batch scrape participants (with offset)")
+        print("   5. ❌ Exit")
         
-        # Scrape participants
-        participants = scraper.scrape_participants(include_contact_info=include_contact)
+        choice = input("\n💭 Enter your choice (1-5): ").strip()
         
-        if participants:
-            # Validate and clean data
-            participants = scraper.validate_participants(participants)
+        if choice == '1':
+            # Scrape hackathon URLs
+            print("\n🔍 HACKATHON URL SCRAPER")
+            print("-" * 30)
             
-            print(f"\n🎉 SUCCESS!")
-            print(f"✅ Found {len(participants):,} unique participants in this batch")
-            print(f"📊 Batch range: {start_offset + 1:,} to {start_offset + len(participants):,}")
+            # Get filter options
+            print("\n🎯 Filter Options:")
+            print("   Status options: open, completed, upcoming")
+            status = input("Enter status (default: open): ").strip() or "open"
             
-            # Save results
-            scraper.save_results(participants)
+            print("   Type options: online, in-person, hybrid")
+            challenge_type = input("Enter type (default: online): ").strip() or "online"
             
-            # Show sample results
-            print(f"\n📋 Sample participants from this batch:")
-            for i, participant in enumerate(participants[:3]):
-                print(f"   {i+1}. {participant['name']} (@{participant['username']})")
-                if participant['role']:
-                    print(f"      Role: {participant['role']}")
-                if participant['projects']:
-                    print(f"      Projects: {participant['projects']}")
-                if participant['followers']:
-                    print(f"      Followers: {participant['followers']}")
-                if participant['team_status']:
-                    print(f"      Team Status: {participant['team_status']}")
-                print(f"      Profile: {participant['profile_url']}")
+            # Scrape hackathons
+            hackathon_scraper = DevpostHackathonScraper()
+            hackathon_urls = hackathon_scraper.scrape_hackathons(status=status, challenge_type=challenge_type)
+            
+            if hackathon_urls:
+                print(f"\n✅ Successfully scraped {len(hackathon_urls)} hackathon URLs")
                 
-                if participant.get('contact_links'):
-                    print(f"      Contact Info:")
-                    for link_type, link_data in participant['contact_links'].items():
-                        print(f"        {link_type.title()}: {link_data['url']}")
-                
-                if participant.get('bio'):
-                    print(f"      Bio: {participant['bio'][:100]}...")
-                print()
+                # Save to file
+                filename = f"hackathons_{status}_{challenge_type}_{int(time.time())}.json"
+                try:
+                    data = {
+                        "metadata": {
+                            "status": status,
+                            "challenge_type": challenge_type,
+                            "scraped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "total_hackathons": len(hackathon_urls)
+                        },
+                        "hackathon_urls": hackathon_urls
+                    }
+                    
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    print(f"📁 URLs saved to: {filename}")
+                    
+                    # Show first few URLs as preview
+                    print("\n👀 Preview (first 5 URLs):")
+                    for i, url in enumerate(hackathon_urls[:5], 1):
+                        print(f"   {i}. {url}")
+                    
+                    if len(hackathon_urls) > 5:
+                        print(f"   ... and {len(hackathon_urls) - 5} more")
+                        
+                except Exception as e:
+                    print(f"❌ Error saving URLs: {e}")
+            else:
+                print("❌ No hackathon URLs found")
+        
+        elif choice == '2':
+            # Scrape participants from single hackathon
+            print("\n👥 PARTICIPANT SCRAPER")
+            print("-" * 25)
             
-            if len(participants) > 3:
-                print(f"   ... and {len(participants) - 3:,} more participants")
+            hackathon_url = input("🔗 Enter hackathon URL: ").strip()
+            if not hackathon_url:
+                print("❌ No URL provided")
+                continue
             
-            # Show next batch info
-            next_offset = start_offset + len(participants)
-            print(f"\n📝 For next batch, use offset: {next_offset:,}")
-            print(f"📝 Recommended batch size: 3000 (for stability)")
+            # Get scraping options
+            print("\n⚙️  Scraping Options:")
+            max_participants = input("📊 Max participants (default: 5000): ").strip()
+            max_participants = int(max_participants) if max_participants.isdigit() else 5000
+            
+            include_contact = input("📞 Include contact info? (y/n, default: n): ").strip().lower()
+            include_contact_info = include_contact in ['y', 'yes', '1', 'true']
+            
+            # Create scraper and run
+            participant_scraper = DevpostParticipantsScraper(
+                hackathon_url=hackathon_url,
+                max_participants=max_participants
+            )
+            
+            participants = participant_scraper.scrape_participants(include_contact_info=include_contact_info)
+            
+            if participants:
+                # Validate participants
+                participants = participant_scraper.validate_participants(participants)
                 
+                print(f"\n✅ Successfully scraped {len(participants)} participants")
+                
+                # Save results
+                participant_scraper.save_results(participants)
+                
+                # Show summary
+                print("\n📊 Summary:")
+                print(f"   Total participants: {len(participants)}")
+                if participants:
+                    avg_projects = sum(p.get('projects', 0) for p in participants) / len(participants)
+                    avg_followers = sum(p.get('followers', 0) for p in participants) / len(participants)
+                    print(f"   Average projects: {avg_projects:.1f}")
+                    print(f"   Average followers: {avg_followers:.1f}")
+                    
+                    # Show roles distribution
+                    roles = {}
+                    for p in participants:
+                        role = p.get('role', 'Unknown')
+                        roles[role] = roles.get(role, 0) + 1
+                    
+                    if roles:
+                        print("   Top roles:")
+                        for role, count in sorted(roles.items(), key=lambda x: x[1], reverse=True)[:5]:
+                            print(f"     {role}: {count}")
+            else:
+                print("❌ No participants found")
+        
+        elif choice == '3':
+            # Full workflow
+            print("\n🔄 FULL WORKFLOW")
+            print("-" * 20)
+            
+            print("Step 1: Scraping hackathon URLs...")
+            hackathon_scraper = DevpostHackathonScraper()
+            hackathon_urls = hackathon_scraper.scrape_hackathons()
+            
+            if not hackathon_urls:
+                print("❌ No hackathons found, stopping workflow")
+                continue
+            
+            print(f"✅ Found {len(hackathon_urls)} hackathons")
+            
+            # Ask which hackathons to scrape
+            print("\nStep 2: Select hackathons to scrape participants from:")
+            print("   1. All hackathons")
+            print("   2. First N hackathons")
+            print("   3. Select specific hackathons")
+            
+            selection = input("Choose option (1-3): ").strip()
+            
+            selected_urls = []
+            if selection == '1':
+                selected_urls = hackathon_urls
+            elif selection == '2':
+                n = input("How many hackathons? ").strip()
+                n = int(n) if n.isdigit() else 5
+                selected_urls = hackathon_urls[:n]
+            elif selection == '3':
+                print("\nAvailable hackathons:")
+                for i, url in enumerate(hackathon_urls, 1):
+                    hackathon_name = url.split('/')[-1]
+                    print(f"   {i}. {hackathon_name}")
+                
+                indices = input("Enter indices (comma-separated): ").strip()
+                try:
+                    indices = [int(i.strip()) - 1 for i in indices.split(',')]
+                    selected_urls = [hackathon_urls[i] for i in indices if 0 <= i < len(hackathon_urls)]
+                except:
+                    print("❌ Invalid indices, using first 3 hackathons")
+                    selected_urls = hackathon_urls[:3]
+            
+            # Get participant scraping options
+            max_participants = input("\n📊 Max participants per hackathon (default: 1000): ").strip()
+            max_participants = int(max_participants) if max_participants.isdigit() else 1000
+            
+            # Scrape participants from selected hackathons
+            print(f"\nStep 3: Scraping participants from {len(selected_urls)} hackathons...")
+            
+            all_results = {}
+            for i, url in enumerate(selected_urls, 1):
+                hackathon_name = url.split('/')[-1]
+                print(f"\n📋 Processing {i}/{len(selected_urls)}: {hackathon_name}")
+                
+                try:
+                    participant_scraper = DevpostParticipantsScraper(
+                        hackathon_url=url,
+                        max_participants=max_participants
+                    )
+                    
+                    participants = participant_scraper.scrape_participants()
+                    participants = participant_scraper.validate_participants(participants)
+                    
+                    if participants:
+                        participant_scraper.save_results(participants)
+                        all_results[hackathon_name] = len(participants)
+                        print(f"   ✅ {len(participants)} participants scraped")
+                    else:
+                        print(f"   ❌ No participants found")
+                        all_results[hackathon_name] = 0
+                    
+                    # Add delay between hackathons
+                    if i < len(selected_urls):
+                        print("   ⏸️  Waiting 30 seconds before next hackathon...")
+                        time.sleep(30)
+                        
+                except Exception as e:
+                    print(f"   ❌ Error scraping {hackathon_name}: {e}")
+                    all_results[hackathon_name] = 0
+            
+            # Show final summary
+            print("\n🎯 WORKFLOW COMPLETE")
+            print("=" * 30)
+            total_participants = sum(all_results.values())
+            print(f"Total participants scraped: {total_participants:,}")
+            print("\nResults by hackathon:")
+            for hackathon, count in all_results.items():
+                print(f"   {hackathon}: {count:,} participants")
+        
+        elif choice == '4':
+            # Batch scrape with offset
+            print("\n📊 BATCH PARTICIPANT SCRAPER")
+            print("-" * 30)
+            
+            hackathon_url = input("🔗 Enter hackathon URL: ").strip()
+            if not hackathon_url:
+                print("❌ No URL provided")
+                continue
+            
+            print("\n⚙️  Batch Options:")
+            start_offset = input("🔢 Start offset (default: 0): ").strip()
+            start_offset = int(start_offset) if start_offset.isdigit() else 0
+            
+            batch_size = input("📦 Batch size (default: 1000): ").strip()
+            batch_size = int(batch_size) if batch_size.isdigit() else 1000
+            
+            total_batches = input("🔄 Number of batches (default: 1): ").strip()
+            total_batches = int(total_batches) if total_batches.isdigit() else 1
+            
+            # Run batches
+            for batch_num in range(total_batches):
+                current_offset = start_offset + (batch_num * batch_size)
+                
+                print(f"\n📦 Processing batch {batch_num + 1}/{total_batches}")
+                print(f"   Offset: {current_offset:,}")
+                print(f"   Target: participants {current_offset + 1:,} to {current_offset + batch_size:,}")
+                
+                try:
+                    participant_scraper = DevpostParticipantsScraper(
+                        hackathon_url=hackathon_url,
+                        max_participants=batch_size,
+                        start_offset=current_offset
+                    )
+                    
+                    participants = participant_scraper.scrape_participants()
+                    participants = participant_scraper.validate_participants(participants)
+                    
+                    if participants:
+                        participant_scraper.save_results(participants)
+                        print(f"   ✅ Batch {batch_num + 1} complete: {len(participants)} participants")
+                    else:
+                        print(f"   ❌ Batch {batch_num + 1} failed: No participants found")
+                        break  # Stop if no more participants
+                    
+                    # Add delay between batches
+                    if batch_num < total_batches - 1:
+                        delay = random.randint(60, 120)  # 1-2 minute delay
+                        print(f"   ⏸️  Waiting {delay} seconds before next batch...")
+                        time.sleep(delay)
+                        
+                except Exception as e:
+                    print(f"   ❌ Batch {batch_num + 1} error: {e}")
+                    continue
+        
+        elif choice == '5':
+            print("\n👋 Thanks for using the scraper!")
+            break
+        
         else:
-            print("❌ No participants found. This could be due to:")
-            print("   • Offset beyond total participants")
-            print("   • Login required")
-            print("   • Page structure changed")
-            print("   • Network issues")
-            
-    except KeyboardInterrupt:
-        print("\n⚠️  Scraping interrupted by user")
-        print("💾 Check for checkpoint files to resume later")
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
+            print("❌ Invalid choice. Please enter 1-5.")
+        
+        # Ask if user wants to continue
+        if choice in ['1', '2', '3', '4']:
+            print("\n" + "="*60)
+            continue_choice = input("Continue with another operation? (y/n): ").strip().lower()
+            if continue_choice not in ['y', 'yes', '1']:
+                print("\n👋 Thanks for using the scraper!")
+                break
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⛔ Operation cancelled by user")
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
